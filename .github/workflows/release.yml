@@ -57,13 +57,6 @@ jobs:
           brew update
           brew install utf8proc
 
-      - name: Installing codesign certificates
-        if: matrix.os == 'macos-latest'
-        uses: apple-actions/import-codesign-certs@v3
-        with:
-          p12-file-base64: ${{ secrets.APPLE_CERT_DATA }}
-          p12-password: ${{ secrets.APPLE_CERT_PASSWORD }}
-
       - name: Install SFML native dependencies
         if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x64'
         run: |
@@ -132,31 +125,47 @@ jobs:
           npm install ./backend/trackaudio-afv-1.0.0.tgz
           npm install
 
+      - name: Generate self-signed certificate
+        if: matrix.os == 'macos-latest'
+        run: |
+          # Create a temporary keychain
+          security create-keychain -p temp build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p temp build.keychain
+          
+          # Generate self-signed certificate
+          openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=TrackAudio/O=TrackAudio"
+          
+          # Import certificate into keychain
+          openssl pkcs12 -export -out cert.p12 -inkey key.pem -in cert.pem -password pass:temp
+          security import cert.p12 -k build.keychain -P temp -T /usr/bin/codesign
+          
+          # Configure keychain settings
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k temp build.keychain
+
+      - name: Package app with self-signed cert
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Use self-signed cert for codesigning
+          export CSC_NAME="TrackAudio"
+          export CSC_LINK="file://$(pwd)/cert.p12"
+          export CSC_KEY_PASSWORD="temp"
+          
+          npm run build:mac -- --${{ matrix.arch }} --publish=never
+          
+          # Clean up
+          security delete-keychain build.keychain
+          rm -f key.pem cert.pem cert.p12
+
       - name: Package app
         if: matrix.os == 'windows-2022'
         shell: bash
         run: npm run build:win -- --publish=never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install notarization tools
-        if: matrix.os == 'macos-latest'
-        run: |
-          cat << EOF > ./.a.p8
-          ${{ secrets.APPLE_API_KEY }}
-          EOF
-
-      - name: Package app
-        if: matrix.os == 'macos-latest'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_API_KEY: "./.a.p8"
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: |
-          npm run build:mac -- --${{ matrix.arch }} --publish=never
-          rm ./.a.p8
 
       - name: Package app
         if: matrix.os == 'ubuntu-latest'
